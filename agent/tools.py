@@ -212,4 +212,59 @@ def _shell_quote(s: str) -> str:
     return "'" + s.replace("'", "'\\''") + "'"
 
 
-ALL_TOOLS = [bash, read, write, edit, glob, grep]
+@tool
+def recall(query: str) -> str:
+    """Search your memory for relevant knowledge from past sessions. Use this when you need context about: the project structure, user preferences, what worked before, file locations, or past decisions. Call this BEFORE exploring with bash/glob/grep — you might already know the answer.
+
+    Args:
+        query: What you want to remember. Be specific, e.g. "where is the auth middleware" or "how does user want tests written".
+    """
+    try:
+        import os
+        from mem0 import MemoryClient
+        api_key = os.environ.get("MEM0_API_KEY", "")
+        if not api_key:
+            return "[memory not configured]"
+        client = MemoryClient(api_key=api_key)
+        results = client.search(
+            query,
+            user_id="codie",
+            limit=5,
+            filters={"AND": [{"user_id": "codie"}]},
+        )
+        items = results.get("results", []) if isinstance(results, dict) else results
+        if not items:
+            return "[no relevant memories found]"
+
+        # Strict repo scoping — only same repo, user_pref, or pattern
+        config = get_config()
+        cwd = config.get("configurable", {}).get("cwd", "/tmp")
+        try:
+            import subprocess as _sp
+            r = _sp.run("git remote get-url origin 2>/dev/null", shell=True, cwd=cwd, capture_output=True, text=True, timeout=5)
+            repo_id = r.stdout.strip() if r.stdout.strip() else cwd
+        except Exception:
+            repo_id = cwd
+
+        memories = []
+        for m in items:
+            if not isinstance(m, dict):
+                continue
+            text = m.get("memory", str(m))
+            meta = m.get("metadata", {}) or {}
+            mem_repo = meta.get("repo", "")
+            mem_type = meta.get("type", "")
+
+            # Same repo, user_pref, pattern → include. Other repo's facts → skip.
+            if mem_repo and mem_repo != repo_id and mem_type not in ("user_pref", "pattern"):
+                continue
+            memories.append(text)
+
+        if not memories:
+            return "[no relevant memories for this repo]"
+        return "\n".join(f"- {m}" for m in memories[:5])
+    except Exception as e:
+        return f"[memory search failed: {e}]"
+
+
+ALL_TOOLS = [bash, read, write, edit, glob, grep, recall]

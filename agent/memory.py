@@ -225,13 +225,20 @@ def recall(query: str, repo_id: str = "", limit: int = 5) -> tuple[list[str], li
             mem_type = meta.get("type", "")
             score = m.get("score", 0.5)  # similarity score from Mem0
 
-            if not mem_repo or mem_repo == repo_id or mem_type == "user_pref":
-                candidates.append({
-                    "text": text,
-                    "id": mem_id,
-                    "similarity": score,
-                    "q_value": _get_q(mem_id) if mem_id else Q_INIT,
-                })
+            # Strict repo scoping:
+            # - Same repo → always include
+            # - user_pref → include (global, applies everywhere)
+            # - pattern → include (reusable strategy)
+            # - Different repo + repo_fact → exclude (not relevant here)
+            if mem_repo and mem_repo != repo_id and mem_type not in ("user_pref", "pattern"):
+                continue
+
+            candidates.append({
+                "text": text,
+                "id": mem_id,
+                "similarity": score,
+                "q_value": _get_q(mem_id) if mem_id else Q_INIT,
+            })
 
         if not candidates:
             return [], []
@@ -365,6 +372,55 @@ def extract_facts(messages: list) -> list[dict]:
         return []
     except Exception as e:
         logger.warning("Fact extraction failed: %s", e)
+        return []
+
+
+RETRO_EXTRACTION_PROMPT = """\
+You are a memory extraction agent reviewing a SUCCESSFUL coding task.
+This task completed with no errors. Your job is to extract facts that explain WHY it succeeded — what context, patterns, or decisions made it work.
+
+Focus on:
+- **shortcuts**: What did the agent already know that saved time?
+- **decisions**: What approach was chosen and why was it the right one?
+- **reusable patterns**: What strategy here would work for similar tasks?
+- **pitfalls avoided**: What could have gone wrong but didn't?
+
+Do NOT repeat facts that are obvious from the task description.
+Do NOT extract what was done — extract what made it work.
+
+Max 3 facts. Empty list if nothing insightful.
+
+Return ONLY a JSON array: [{"type": "pattern", "text": "..."}, ...]
+"""
+
+
+def extract_retro_facts(messages: list) -> list[dict]:
+    """Retroactive extraction — runs on successful tasks to catch what the first pass missed.
+    Asks 'what made this succeed?' instead of 'what happened?'"""
+    transcript = _compress_transcript(messages)
+    if not transcript.strip():
+        return []
+
+    try:
+        llm = _get_llm()
+        response = llm.messages.create(
+            model=EXTRACTION_MODEL,
+            max_tokens=400,
+            system=RETRO_EXTRACTION_PROMPT,
+            messages=[{"role": "user", "content": f"This task succeeded cleanly.\n\n{transcript}"}],
+        )
+        text = response.content[0].text.strip()
+
+        match = re.search(r"\[.*\]", text, re.DOTALL)
+        if match:
+            text = match.group(0)
+
+        facts = json.loads(text)
+        if isinstance(facts, list):
+            return [f for f in facts if isinstance(f, dict) and "text" in f][:3]
+        return []
+    except Exception as e:
+        logger.warning("Retro extraction failed: %s", e)
         return []
 
 

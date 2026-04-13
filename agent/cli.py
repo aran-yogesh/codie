@@ -62,6 +62,10 @@ def _tool_header(name: str, inputs: dict) -> str:
         p = inputs.get("pattern", "")
         inc = inputs.get("include", "")
         return f"[yellow]●[/yellow] [bold]Grep[/bold]({p}{', ' + inc if inc else ''})"
+    elif name == "recall":
+        q = inputs.get("query", "")
+        display = q if len(q) <= 60 else q[:57] + "..."
+        return f"[yellow]●[/yellow] [bold]Recall[/bold]({display})"
     return f"[yellow]●[/yellow] [bold]{name}[/bold]"
 
 
@@ -82,6 +86,11 @@ def _tool_result(name: str, inputs: dict, result: str):
         console.print(f"  ⎿ [dim]Found {len(lines)} files[/dim]")
     elif name == "grep":
         console.print(f"  ⎿ [dim]{len(lines)} matches[/dim]")
+    elif name == "recall":
+        for line in lines[:3]:
+            console.print(f"  ⎿ [dim]{line}[/dim]")
+        if len(lines) > 3:
+            console.print(f"  ⎿ [dim]... ({len(lines) - 3} more)[/dim]")
     else:
         for line in lines[:3]:
             console.print(f"  ⎿ [dim]{line}[/dim]")
@@ -162,23 +171,34 @@ def _check_correction(user_input: str, repo_id: str):
 
 
 def _learn(messages: list, repo_id: str, recalled_ids: list[str] | None = None):
-    """AFTER task: extract facts + MemRL utility update."""
+    """AFTER task: extract facts + MemRL utility update + retroactive extraction."""
     if not memory.is_enabled():
         return
 
     # MemRL: compute reward and update Q-values of recalled memories
+    reward = 1.0
     if recalled_ids:
         reward = memory.compute_reward(messages)
         memory.update_utility(recalled_ids, reward)
         console.print(f"[dim]● utility update: reward={reward} for {len(recalled_ids)} memories[/dim]")
+    else:
+        reward = memory.compute_reward(messages)
 
     if not memory.should_learn(messages):
         return
 
+    # Standard extraction — "what happened?"
     facts = memory.extract_facts(messages)
     if facts:
         stored = memory.learn(facts, repo_id=repo_id)
         console.print(f"[dim]● learned {stored} facts[/dim]")
+
+    # Retroactive extraction — "what made this succeed?" (only on clean success)
+    if reward == 1.0:
+        retro_facts = memory.extract_retro_facts(messages)
+        if retro_facts:
+            retro_stored = memory.learn(retro_facts, repo_id=repo_id)
+            console.print(f"[dim]● retro-learned {retro_stored} patterns[/dim]")
 
 
 def _maybe_tick():
