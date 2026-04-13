@@ -1,8 +1,11 @@
-"""System prompt — matches Claude Code tone and behavior."""
+"""System prompt — dynamic context + memory injection."""
 
 from __future__ import annotations
 
+import asyncio
+import os
 import subprocess
+
 
 SYSTEM_PROMPT = """\
 You are a coding agent. You help users with software engineering tasks.
@@ -39,10 +42,11 @@ IMPORTANT: Always prefer dedicated tools over bash. Read > cat, Edit > sed, Glob
 `{cwd}`
 
 {context}
+{memories}
 """
 
 
-def _run(cmd: str, cwd: str, timeout: int = 5) -> str:
+def _run_sync(cmd: str, cwd: str, timeout: int = 5) -> str:
     try:
         r = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True, text=True, timeout=timeout)
         return r.stdout.strip()
@@ -50,14 +54,14 @@ def _run(cmd: str, cwd: str, timeout: int = 5) -> str:
         return ""
 
 
-def _detect_context(cwd: str) -> str:
+def _detect_context_sync(cwd: str) -> str:
     sections = []
 
-    files = _run("ls -1", cwd)
+    files = _run_sync("ls -1", cwd)
     if files:
         sections.append(f"Files:\n```\n{files}\n```")
 
-    branch = _run("git rev-parse --abbrev-ref HEAD 2>/dev/null", cwd)
+    branch = _run_sync("git rev-parse --abbrev-ref HEAD 2>/dev/null", cwd)
     if branch:
         sections.append(f"Git: `{branch}`")
 
@@ -70,13 +74,26 @@ def _detect_context(cwd: str) -> str:
             sections.append(f"Language: {lang}")
             break
 
-    agents_md = _run("cat AGENTS.md 2>/dev/null", cwd)
-    if agents_md:
-        sections.append(f"Repo instructions:\n{agents_md}")
+    # Check for AGENTS.md
+    agents_path = os.path.join(cwd, "AGENTS.md")
+    if os.path.isfile(agents_path):
+        try:
+            with open(agents_path) as f:
+                agents_md = f.read().strip()
+            if agents_md:
+                sections.append(f"Repo instructions:\n{agents_md}")
+        except Exception:
+            pass
 
     return "\n".join(sections)
 
 
-def build_system_prompt(cwd: str) -> str:
-    context = _detect_context(cwd)
-    return SYSTEM_PROMPT.replace("{cwd}", cwd).replace("{context}", context)
+async def build_system_prompt(cwd: str, memories: str = "") -> str:
+    """Build system prompt with context + memories. Runs blocking I/O in a thread."""
+    context = await asyncio.to_thread(_detect_context_sync, cwd)
+    return (
+        SYSTEM_PROMPT
+        .replace("{cwd}", cwd)
+        .replace("{context}", context)
+        .replace("{memories}", memories)
+    )

@@ -5,10 +5,12 @@ description = "Self-improving CLI coding agent with LangGraph server"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 dependencies = [
+    "anthropic>=0.40.0",
     "langchain-anthropic>1.1.0",
     "langgraph>=1.0.8",
     "langgraph-sdk>=0.1.0",
     "langgraph-cli[inmem]>=0.4.12",
+    "mem0ai>=0.1.0",
     "rich>=13.0.0",
     "python-dotenv>=1.0.0",
 ]

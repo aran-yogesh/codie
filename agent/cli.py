@@ -10,17 +10,21 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 
+from agent import memory
+
 console = Console()
 
 SERVER_URL = os.environ.get("LANGGRAPH_API_URL", "http://localhost:2025")
 
 
 def print_banner():
+    mem_status = "[green]memory on[/green]" if memory.is_enabled() else "[dim]memory off[/dim]"
     console.print(
         Panel(
-            "[bold]codie[/bold] — self-improving coding agent\n"
-            "  [dim]/quit[/dim]  — exit\n"
-            "  [dim]/clear[/dim] — clear screen",
+            f"[bold]codie[/bold] — self-improving coding agent ({mem_status})\n"
+            "  [dim]/quit[/dim]     — exit\n"
+            "  [dim]/clear[/dim]    — clear screen\n"
+            "  [dim]/memories[/dim] — show stored memories",
             title="codie",
             border_style="blue",
         )
@@ -131,15 +135,75 @@ def _print_steps(messages: list) -> str:
     return final_text
 
 
+# ─── MEMORY INTEGRATION ─────────────────────────────────────────────
+
+
+def _recall(task: str, repo_id: str) -> tuple[str, str, list[str]]:
+    """BEFORE task: two-phase retrieval. Returns (task, memories_text, memory_ids)."""
+    if not memory.is_enabled() or not memory.should_recall(task):
+        return task, "", []
+
+    memories, memory_ids = memory.recall(task, repo_id=repo_id)
+    if memories:
+        console.print(f"[dim]● recalled {len(memories)} memories (MemRL ranked)[/dim]")
+        return task, memory.format_for_system_prompt(memories), memory_ids
+
+    return task, "", []
+
+
+def _check_correction(user_input: str, repo_id: str):
+    """Check if user input is a correction — save immediately, don't wait for end of task."""
+    if not memory.is_enabled():
+        return
+    correction = memory.detect_correction(user_input)
+    if correction:
+        memory.learn_correction(correction, repo_id)
+        console.print("[dim]● saved correction[/dim]")
+
+
+def _learn(messages: list, repo_id: str, recalled_ids: list[str] | None = None):
+    """AFTER task: extract facts + MemRL utility update."""
+    if not memory.is_enabled():
+        return
+
+    # MemRL: compute reward and update Q-values of recalled memories
+    if recalled_ids:
+        reward = memory.compute_reward(messages)
+        memory.update_utility(recalled_ids, reward)
+        console.print(f"[dim]● utility update: reward={reward} for {len(recalled_ids)} memories[/dim]")
+
+    if not memory.should_learn(messages):
+        return
+
+    facts = memory.extract_facts(messages)
+    if facts:
+        stored = memory.learn(facts, repo_id=repo_id)
+        console.print(f"[dim]● learned {stored} facts[/dim]")
+
+
+def _maybe_tick():
+    """Run ticker on session start if needed."""
+    if not memory.is_enabled():
+        return
+    if memory.should_tick():
+        console.print("[dim]● consolidating memories...[/dim]")
+        summary = memory.tick()
+        if summary:
+            console.print(f"[dim]● {summary}[/dim]")
+
+
+# ─── SESSION ─────────────────────────────────────────────────────────
+
+
 async def session(cwd: str):
-    """Run the entire interactive session on one event loop, one thread."""
+    """One event loop, one thread for the entire session."""
     from langgraph_sdk import get_client
 
     client = get_client(url=SERVER_URL)
     thread = await client.threads.create()
     thread_id = thread["thread_id"]
 
-    # Track which messages we've already printed steps for
+    repo_id = memory.get_repo_id(cwd)
     printed_msg_count = 0
 
     while True:
@@ -159,21 +223,42 @@ async def session(cwd: str):
             console.clear()
             print_banner()
             continue
+        if task == "/memories":
+            all_mems = memory.get_all()
+            if not all_mems:
+                console.print("[dim]No memories stored yet.[/dim]")
+            else:
+                console.print(f"\n[bold]Memories ({len(all_mems)}):[/bold]")
+                for i, m in enumerate(all_mems, 1):
+                    console.print(f"  {i}. {m}")
+            console.print()
+            continue
 
         console.print()
+
+        # ── Check for corrections (save immediately) ──
+        _check_correction(task, repo_id)
+
+        # ── RECALL: two-phase retrieval (MemRL) ──
+        task, memories_text, recalled_ids = _recall(task, repo_id)
+
         try:
+            # ── WORK ──
+            status = console.status("[bold blue]...[/bold blue]", spinner="dots")
+            status.start()
+
             run = await client.runs.create(
                 thread_id,
                 "agent",
                 input={"messages": [{"role": "user", "content": task}]},
-                config={"configurable": {"cwd": cwd}},
+                config={"configurable": {"cwd": cwd, "memories": memories_text}},
             )
             await client.runs.join(thread_id, run["run_id"])
+            status.stop()
 
             state = await client.threads.get_state(thread_id)
             messages = state.get("values", {}).get("messages", [])
 
-            # Only print steps for NEW messages since last turn
             new_messages = messages[printed_msg_count:]
             printed_msg_count = len(messages)
 
@@ -183,6 +268,9 @@ async def session(cwd: str):
                 console.print()
                 console.print(Markdown(response))
                 console.print()
+
+                # ── LEARN + MemRL UTILITY UPDATE ──
+                _learn(new_messages, repo_id, recalled_ids=recalled_ids)
             else:
                 console.print("[dim]No response.[/dim]")
 
@@ -192,10 +280,17 @@ async def session(cwd: str):
 
 
 def main():
-    load_dotenv()
+    # Load .env from: ~/.codie/.env (global) → cwd/.env (local override)
+    home_env = os.path.expanduser("~/.codie/.env")
+    load_dotenv(home_env)
+    load_dotenv()  # also load from cwd
     print_banner()
     cwd = os.getcwd()
     console.print(f"[dim]{cwd}[/dim]\n")
+
+    # Ticker: consolidate memories on session start if due
+    _maybe_tick()
+    memory.bump_session_count()
 
     try:
         asyncio.run(session(cwd))
