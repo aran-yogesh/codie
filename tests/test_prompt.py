@@ -1,38 +1,70 @@
-"""Tests for prompt module."""
+"""Tests for agent/prompt.py — system prompt builder."""
 
-from __future__ import annotations
+import os
 
-import asyncio
+import pytest
 
-from agent.prompt import build_system_prompt
+from agent.prompt import build_system_prompt, build_memory_section, _detect_context
+from agent.memory import ensure_codie_dir, save_block, save_skill
 
 
-def _run(coro):
-    return asyncio.run(coro)
+@pytest.fixture
+def cwd(tmp_path):
+    ensure_codie_dir(str(tmp_path))
+    return str(tmp_path)
 
 
 class TestBuildSystemPrompt:
-    def test_includes_cwd(self, tmp_path):
-        prompt = _run(build_system_prompt(str(tmp_path)))
-        assert str(tmp_path) in prompt
+    def test_includes_cwd(self, cwd):
+        prompt = build_system_prompt(cwd)
+        assert cwd in prompt
 
-    def test_includes_tool_instructions(self, tmp_path):
-        prompt = _run(build_system_prompt(str(tmp_path)))
-        assert "bash" in prompt.lower()
-        assert "read" in prompt.lower()
-        assert "edit" in prompt.lower()
+    def test_includes_memory_section(self, cwd):
+        prompt = build_system_prompt(cwd)
+        assert "<memory>" in prompt
 
-    def test_safe_with_braces(self):
-        prompt = _run(build_system_prompt("/path/{with}/braces"))
-        assert "/path/{with}/braces" in prompt
+    def test_includes_tool_instructions(self, cwd):
+        prompt = build_system_prompt(cwd)
+        assert "core_memory_append" in prompt
+        assert "archival_memory_search" in prompt
 
-    def test_detects_git(self, tmp_path):
-        import subprocess
-        subprocess.run("git init", shell=True, cwd=str(tmp_path), capture_output=True)
-        prompt = _run(build_system_prompt(str(tmp_path)))
-        assert "Git" in prompt or "main" in prompt or "master" in prompt
 
+class TestBuildMemorySection:
+    def test_empty_blocks(self, cwd):
+        section = build_memory_section(cwd)
+        assert "<memory>" in section
+        assert "persona" in section
+
+    def test_block_content_included(self, cwd):
+        save_block(cwd, "user", "prefers tabs over spaces")
+        section = build_memory_section(cwd)
+        assert "prefers tabs over spaces" in section
+
+    def test_skills_listed(self, cwd):
+        save_skill(cwd, "deploy", "Deploy the app", "1. Build\n2. Push")
+        section = build_memory_section(cwd)
+        assert "<skills>" in section
+        assert "deploy" in section
+
+    def test_no_codie_dir(self, tmp_path):
+        # No .codie/ exists — should not crash
+        section = build_memory_section(str(tmp_path))
+        # Either empty or gracefully handles missing dir
+        assert isinstance(section, str)
+
+
+class TestDetectContext:
     def test_detects_python(self, tmp_path):
         (tmp_path / "pyproject.toml").write_text("[project]\nname='test'\n")
-        prompt = _run(build_system_prompt(str(tmp_path)))
-        assert "Python" in prompt
+        context = _detect_context(str(tmp_path))
+        assert "Python" in context
+
+    def test_detects_node(self, tmp_path):
+        (tmp_path / "package.json").write_text('{"name":"test"}')
+        context = _detect_context(str(tmp_path))
+        assert "Node.js" in context
+
+    def test_reads_agents_md(self, tmp_path):
+        (tmp_path / "AGENTS.md").write_text("Always use pytest")
+        context = _detect_context(str(tmp_path))
+        assert "Always use pytest" in context

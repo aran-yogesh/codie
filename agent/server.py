@@ -16,15 +16,13 @@ MODEL = os.environ.get("LLM_MODEL_ID", "claude-sonnet-4-20250514")
 
 async def get_agent(config: RunnableConfig):
     """Create the coding agent. Entry point for langgraph.json."""
-    configurable = config.get("configurable", {})
-    cwd = configurable.get("cwd", "/tmp")
-    memories = configurable.get("memories", "")
+    cwd = config.get("configurable", {}).get("cwd", "/tmp")
 
     model = ChatAnthropic(
         model=MODEL,
         extra_headers={"anthropic-beta": "prompt-caching-2024-07-31"},
     )
 
-    system_prompt = await build_system_prompt(cwd, memories=memories)
+    system_prompt = build_system_prompt(cwd)
 
     return create_react_agent(model, ALL_TOOLS, prompt=system_prompt)

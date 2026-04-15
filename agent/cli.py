@@ -10,21 +10,20 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 
-from agent import memory
-
 console = Console()
 
 SERVER_URL = os.environ.get("LANGGRAPH_API_URL", "http://localhost:2025")
 
 
 def print_banner():
-    mem_status = "[green]memory on[/green]" if memory.is_enabled() else "[dim]memory off[/dim]"
     console.print(
         Panel(
-            f"[bold]codie[/bold] — self-improving coding agent ({mem_status})\n"
-            "  [dim]/quit[/dim]     — exit\n"
+            "[bold]codie[/bold] — self-improving coding agent\n"
+            "  [dim]/init[/dim]     — explore codebase and initialize memory\n"
+            "  [dim]/remember[/dim] — reflect and save learnings to memory\n"
+            "  [dim]/memory[/dim]   — show current memory blocks\n"
             "  [dim]/clear[/dim]    — clear screen\n"
-            "  [dim]/memories[/dim] — show stored memories",
+            "  [dim]/quit[/dim]     — exit",
             title="codie",
             border_style="blue",
         )
@@ -62,10 +61,18 @@ def _tool_header(name: str, inputs: dict) -> str:
         p = inputs.get("pattern", "")
         inc = inputs.get("include", "")
         return f"[yellow]●[/yellow] [bold]Grep[/bold]({p}{', ' + inc if inc else ''})"
-    elif name == "recall":
-        q = inputs.get("query", "")
-        display = q if len(q) <= 60 else q[:57] + "..."
-        return f"[yellow]●[/yellow] [bold]Recall[/bold]({display})"
+    elif name == "core_memory_append":
+        return f"[magenta]●[/magenta] [bold]Memory Append[/bold]({inputs.get('label', '')})"
+    elif name == "core_memory_replace":
+        return f"[magenta]●[/magenta] [bold]Memory Replace[/bold]({inputs.get('label', '')})"
+    elif name == "archival_memory_insert":
+        return f"[magenta]●[/magenta] [bold]Archival Insert[/bold]"
+    elif name == "archival_memory_search":
+        return f"[magenta]●[/magenta] [bold]Archival Search[/bold]({inputs.get('query', '')})"
+    elif name == "skill_save":
+        return f"[magenta]●[/magenta] [bold]Skill Save[/bold]({inputs.get('name', '')})"
+    elif name == "skill_search":
+        return f"[magenta]●[/magenta] [bold]Skill Search[/bold]({inputs.get('query', '')})"
     return f"[yellow]●[/yellow] [bold]{name}[/bold]"
 
 
@@ -86,11 +93,6 @@ def _tool_result(name: str, inputs: dict, result: str):
         console.print(f"  ⎿ [dim]Found {len(lines)} files[/dim]")
     elif name == "grep":
         console.print(f"  ⎿ [dim]{len(lines)} matches[/dim]")
-    elif name == "recall":
-        for line in lines[:3]:
-            console.print(f"  ⎿ [dim]{line}[/dim]")
-        if len(lines) > 3:
-            console.print(f"  ⎿ [dim]... ({len(lines) - 3} more)[/dim]")
     else:
         for line in lines[:3]:
             console.print(f"  ⎿ [dim]{line}[/dim]")
@@ -144,86 +146,15 @@ def _print_steps(messages: list) -> str:
     return final_text
 
 
-# ─── MEMORY INTEGRATION ─────────────────────────────────────────────
-
-
-def _recall(task: str, repo_id: str) -> tuple[str, str, list[str]]:
-    """BEFORE task: two-phase retrieval. Returns (task, memories_text, memory_ids)."""
-    if not memory.is_enabled() or not memory.should_recall(task):
-        return task, "", []
-
-    memories, memory_ids = memory.recall(task, repo_id=repo_id)
-    if memories:
-        console.print(f"[dim]● recalled {len(memories)} memories (MemRL ranked)[/dim]")
-        return task, memory.format_for_system_prompt(memories), memory_ids
-
-    return task, "", []
-
-
-def _check_correction(user_input: str, repo_id: str):
-    """Check if user input is a correction — save immediately, don't wait for end of task."""
-    if not memory.is_enabled():
-        return
-    correction = memory.detect_correction(user_input)
-    if correction:
-        memory.learn_correction(correction, repo_id)
-        console.print("[dim]● saved correction[/dim]")
-
-
-def _learn(messages: list, repo_id: str, recalled_ids: list[str] | None = None):
-    """AFTER task: extract facts + MemRL utility update + retroactive extraction."""
-    if not memory.is_enabled():
-        return
-
-    # MemRL: compute reward and update Q-values of recalled memories
-    reward = 1.0
-    if recalled_ids:
-        reward = memory.compute_reward(messages)
-        memory.update_utility(recalled_ids, reward)
-        console.print(f"[dim]● utility update: reward={reward} for {len(recalled_ids)} memories[/dim]")
-    else:
-        reward = memory.compute_reward(messages)
-
-    if not memory.should_learn(messages):
-        return
-
-    # Standard extraction — "what happened?"
-    facts = memory.extract_facts(messages)
-    if facts:
-        stored = memory.learn(facts, repo_id=repo_id)
-        console.print(f"[dim]● learned {stored} facts[/dim]")
-
-    # Retroactive extraction — "what made this succeed?" (only on clean success)
-    if reward == 1.0:
-        retro_facts = memory.extract_retro_facts(messages)
-        if retro_facts:
-            retro_stored = memory.learn(retro_facts, repo_id=repo_id)
-            console.print(f"[dim]● retro-learned {retro_stored} patterns[/dim]")
-
-
-def _maybe_tick():
-    """Run ticker on session start if needed."""
-    if not memory.is_enabled():
-        return
-    if memory.should_tick():
-        console.print("[dim]● consolidating memories...[/dim]")
-        summary = memory.tick()
-        if summary:
-            console.print(f"[dim]● {summary}[/dim]")
-
-
-# ─── SESSION ─────────────────────────────────────────────────────────
-
-
 async def session(cwd: str):
-    """One event loop, one thread for the entire session."""
+    """Run the entire interactive session on one event loop, one thread."""
     from langgraph_sdk import get_client
 
     client = get_client(url=SERVER_URL)
     thread = await client.threads.create()
     thread_id = thread["thread_id"]
 
-    repo_id = memory.get_repo_id(cwd)
+    # Track which messages we've already printed steps for
     printed_msg_count = 0
 
     while True:
@@ -237,48 +168,72 @@ async def session(cwd: str):
         if not task:
             continue
         if task == "/quit":
+            # Post-session reflection
+            try:
+                from agent.reflection import _reflect_and_learn
+                state = await client.threads.get_state(thread_id)
+                messages = state.get("values", {}).get("messages", [])
+                if messages:
+                    _reflect_and_learn(cwd, messages)
+                    console.print("[dim]Session learnings saved.[/dim]")
+            except Exception:
+                pass
             console.print("[dim]Bye![/dim]")
             break
         if task == "/clear":
             console.clear()
             print_banner()
             continue
-        if task == "/memories":
-            all_mems = memory.get_all()
-            if not all_mems:
-                console.print("[dim]No memories stored yet.[/dim]")
-            else:
-                console.print(f"\n[bold]Memories ({len(all_mems)}):[/bold]")
-                for i, m in enumerate(all_mems, 1):
-                    console.print(f"  {i}. {m}")
-            console.print()
+        if task == "/memory":
+            try:
+                from agent.memory import load_all_blocks, ensure_codie_dir
+                ensure_codie_dir(cwd)
+                blocks = load_all_blocks(cwd)
+                for b in blocks:
+                    console.print(Panel(
+                        b["content"] or "[dim]empty[/dim]",
+                        title=f"[bold]{b['label']}[/bold] ({len(b['content'])}/{b['max_chars']} chars)",
+                        border_style="magenta",
+                    ))
+            except Exception as e:
+                console.print(f"[red]{e}[/red]")
             continue
+        if task == "/init":
+            task = (
+                "Explore this codebase and build your initial memory:\n"
+                "1. Use glob('**/*') to see the full structure\n"
+                "2. Read README, config files (pyproject.toml, package.json, etc.), and key source files\n"
+                "3. Use core_memory_replace on the 'project' block to write a concise summary of:\n"
+                "   - Project purpose and structure\n"
+                "   - Key technologies and dependencies\n"
+                "   - Architecture patterns\n"
+                "   - Important conventions or gotchas\n"
+                "4. Update your 'persona' block with how you should approach this specific codebase\n"
+                "Be thorough but concise. This memory will help you in future sessions."
+            )
+            console.print("[dim]Initializing memory... (exploring codebase)[/dim]")
+        if task.startswith("/remember"):
+            from agent.reflection import build_remember_prompt
+            extra = task[len("/remember"):].strip()
+            task = build_remember_prompt()
+            if extra:
+                task += f"\n\nThe user specifically wants you to remember: {extra}"
+            console.print("[dim]Reflecting on conversation...[/dim]")
 
         console.print()
-
-        # ── Check for corrections (save immediately) ──
-        _check_correction(task, repo_id)
-
-        # ── RECALL: two-phase retrieval (MemRL) ──
-        task, memories_text, recalled_ids = _recall(task, repo_id)
-
         try:
-            # ── WORK ──
-            status = console.status("[bold blue]...[/bold blue]", spinner="dots")
-            status.start()
-
             run = await client.runs.create(
                 thread_id,
                 "agent",
                 input={"messages": [{"role": "user", "content": task}]},
-                config={"configurable": {"cwd": cwd, "memories": memories_text}},
+                config={"configurable": {"cwd": cwd}},
             )
             await client.runs.join(thread_id, run["run_id"])
-            status.stop()
 
             state = await client.threads.get_state(thread_id)
             messages = state.get("values", {}).get("messages", [])
 
+            # Only print steps for NEW messages since last turn
             new_messages = messages[printed_msg_count:]
             printed_msg_count = len(messages)
 
@@ -288,9 +243,6 @@ async def session(cwd: str):
                 console.print()
                 console.print(Markdown(response))
                 console.print()
-
-                # ── LEARN + MemRL UTILITY UPDATE ──
-                _learn(new_messages, repo_id, recalled_ids=recalled_ids)
             else:
                 console.print("[dim]No response.[/dim]")
 
@@ -300,17 +252,10 @@ async def session(cwd: str):
 
 
 def main():
-    # Load .env from: ~/.codie/.env (global) → cwd/.env (local override)
-    home_env = os.path.expanduser("~/.codie/.env")
-    load_dotenv(home_env)
-    load_dotenv()  # also load from cwd
+    load_dotenv()
     print_banner()
     cwd = os.getcwd()
     console.print(f"[dim]{cwd}[/dim]\n")
-
-    # Ticker: consolidate memories on session start if due
-    _maybe_tick()
-    memory.bump_session_count()
 
     try:
         asyncio.run(session(cwd))

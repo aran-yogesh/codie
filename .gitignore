@@ -4,3 +4,7 @@ __pycache__/
 .venv/
 *.egg-info/
 dist/
+.codie/
+.pytest_cache/
+.uv-cache/
+.langgraph_api/

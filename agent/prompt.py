@@ -1,14 +1,12 @@
-"""System prompt — dynamic context + memory injection."""
+"""System prompt — matches Claude Code tone and behavior."""
 
 from __future__ import annotations
 
-import asyncio
-import os
 import subprocess
-
 
 SYSTEM_PROMPT = """\
 You are a coding agent. You help users with software engineering tasks.
+You have persistent memory that survives across sessions — use it to learn and improve.
 
 # Tools
 - `bash` — Run shell commands (tests, git, packages). Do NOT use for file I/O.
@@ -17,10 +15,28 @@ You are a coding agent. You help users with software engineering tasks.
 - `edit` — Edit files via exact string replacement. Use this instead of `sed`.
 - `glob` — Find files by pattern. Use this instead of `find` or `ls`.
 - `grep` — Search file contents by regex. Use this instead of `grep` in bash.
-- `recall` — Search your memory from past sessions. Use BEFORE exploring. You might already know the answer.
 
 IMPORTANT: Always prefer dedicated tools over bash. Read > cat, Edit > sed, Glob > find, Grep > grep.
-IMPORTANT: Before exploring a codebase, call `recall` first to check if you already know the project structure, file locations, or user preferences from past sessions.
+
+# Memory
+You have persistent memory blocks shown below. Update them when you learn something important.
+
+- `core_memory_append(label, content)` — add to a block (persona/user/project)
+- `core_memory_replace(label, old_content, new_content)` — edit a block
+- `archival_memory_insert(content)` — save to long-term searchable storage
+- `archival_memory_search(query)` — search long-term memory
+- `skill_save(name, description, steps)` — save a reusable procedure
+- `skill_search(query)` — find saved procedures
+
+When to update memory:
+- User states a preference or corrects you → update user block
+- You discover project patterns or conventions → update project block
+- You solve a non-trivial problem → save as a skill or archival entry
+- You make a mistake → save the lesson to archival memory
+
+Be concise in memory. Integrate remembered context naturally.
+
+{memory}
 
 # Tone
 - Go straight to the point. Lead with the answer, not the reasoning.
@@ -44,11 +60,10 @@ IMPORTANT: Before exploring a codebase, call `recall` first to check if you alre
 `{cwd}`
 
 {context}
-{memories}
 """
 
 
-def _run_sync(cmd: str, cwd: str, timeout: int = 5) -> str:
+def _run(cmd: str, cwd: str, timeout: int = 5) -> str:
     try:
         r = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True, text=True, timeout=timeout)
         return r.stdout.strip()
@@ -56,14 +71,14 @@ def _run_sync(cmd: str, cwd: str, timeout: int = 5) -> str:
         return ""
 
 
-def _detect_context_sync(cwd: str) -> str:
+def _detect_context(cwd: str) -> str:
     sections = []
 
-    files = _run_sync("ls -1", cwd)
+    files = _run("ls -1", cwd)
     if files:
         sections.append(f"Files:\n```\n{files}\n```")
 
-    branch = _run_sync("git rev-parse --abbrev-ref HEAD 2>/dev/null", cwd)
+    branch = _run("git rev-parse --abbrev-ref HEAD 2>/dev/null", cwd)
     if branch:
         sections.append(f"Git: `{branch}`")
 
@@ -76,26 +91,45 @@ def _detect_context_sync(cwd: str) -> str:
             sections.append(f"Language: {lang}")
             break
 
-    # Check for AGENTS.md
-    agents_path = os.path.join(cwd, "AGENTS.md")
-    if os.path.isfile(agents_path):
-        try:
-            with open(agents_path) as f:
-                agents_md = f.read().strip()
-            if agents_md:
-                sections.append(f"Repo instructions:\n{agents_md}")
-        except Exception:
-            pass
+    agents_md = _run("cat AGENTS.md 2>/dev/null", cwd)
+    if agents_md:
+        sections.append(f"Repo instructions:\n{agents_md}")
 
     return "\n".join(sections)
 
 
-async def build_system_prompt(cwd: str, memories: str = "") -> str:
-    """Build system prompt with context + memories. Runs blocking I/O in a thread."""
-    context = await asyncio.to_thread(_detect_context_sync, cwd)
-    return (
-        SYSTEM_PROMPT
-        .replace("{cwd}", cwd)
-        .replace("{context}", context)
-        .replace("{memories}", memories)
-    )
+def build_memory_section(cwd: str) -> str:
+    """Load memory blocks + skills, format as XML for prompt injection."""
+    try:
+        from agent.memory import load_all_blocks, load_skills
+
+        blocks = load_all_blocks(cwd)
+        parts = ["<memory>"]
+        for block in blocks:
+            content = block["content"]
+            if content:
+                parts.append(f'<block label="{block["label"]}">')
+                parts.append(content)
+                parts.append("</block>")
+        parts.append("</memory>")
+
+        # List available skills
+        skills = load_skills(cwd)
+        if skills:
+            parts.append("\n<skills>")
+            for s in skills:
+                parts.append(f"- {s['name']}: {s['description']}")
+            parts.append("</skills>")
+
+        return "\n".join(parts)
+    except Exception:
+        return ""
+
+
+def build_system_prompt(cwd: str) -> str:
+    context = _detect_context(cwd)
+    memory = build_memory_section(cwd)
+    return (SYSTEM_PROMPT
+            .replace("{cwd}", cwd)
+            .replace("{context}", context)
+            .replace("{memory}", memory))
