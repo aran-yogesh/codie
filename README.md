@@ -62,14 +62,6 @@ uv run codie
 
 codie's memory system lets the agent manage its own memory through tool calls. Memory is stored as local JSON files — no external databases, no vector stores, no APIs.
 
-### Architecture
-
-```
-User (CLI) --> LangGraph Server --> Claude (ReAct Loop) --> 12 Tools
-                                         |
-                                    .codie/ (disk)
-```
-
 ### Memory Layers
 
 ```
