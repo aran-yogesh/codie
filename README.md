@@ -60,6 +60,8 @@ uv run codie
 
 ## How Memory Works
 
+![Memory](docs/memory.png)
+
 codie's memory system lets the agent manage its own memory through tool calls. Memory is stored as local JSON files — no external databases, no vector stores, no APIs.
 
 ### Memory Layers
