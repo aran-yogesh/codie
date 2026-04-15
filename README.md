@@ -54,6 +54,10 @@ uv run codie
 | `/clear` | Clear screen |
 | `/quit` | Save session learnings and exit |
 
+## Architecture
+
+![Architecture](docs/architecture.png)
+
 ## How Memory Works
 
 codie's memory system lets the agent manage its own memory through tool calls. Memory is stored as local JSON files — no external databases, no vector stores, no APIs.
