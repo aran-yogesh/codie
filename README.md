@@ -21,6 +21,8 @@ The agent learns coding preferences in one session and applies them perfectly ac
 uv run python3 benchmark.py    # Reproduce these results
 ```
 
+> **Benchmark scope:** This is a proof of concept for the memory mechanism, not a production eval. Tasks are simple standalone functions and scoring is string-based (presence of `->`, `"""`, `ValueError`). The meaningful result is architectural — memory persists across completely independent sessions and preferences are applied without re-prompting. Testing against more complex, diverse tasks is the next step.
+
 ## Install
 
 ```bash
